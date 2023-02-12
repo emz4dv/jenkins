@@ -1,0 +1,163 @@
+#Required properties:
+#=====================
+
+#t_git: BACKEND/DOCKER/kc-user-idp-link.git
+#t_artifact: kc-user-idp-link
+#t_charts_dir: '${CTX}/${PROJECT_NAME}'
+#t_chart_name: '${PROJECT_NAME}'
+#t_credentials_CTX: ''
+#t_helm_extra_CTX: ''
+#t_k8s_server: 'k8s-master'
+#t_helm_ver: '3'
+
+#=====================
+template_allowed_cxt:
+  - dev
+  - stage
+  - predprod
+  - prod
+
+TemplateVer: 1
+Pipeline:
+  parameters:
+      - item:
+          Name: 'VERSION'
+          Value: '4.2.1'
+          Description: 'версия приложения (major.minor.patch)'
+  script: |
+    def NAMESPACE_PREFIX="::t_namespace::"
+    def CHARTMUSEUM_NAME="::t_chartmuseumName::"
+
+    pipeline {
+      agent any
+
+       environment {
+           CTX = "::t_ctx::"
+           GROOVY_HOME = tool name: '::t_groovy::', type: 'hudson.plugins.groovy.GroovyInstallation'
+       }
+
+      parameters {
+        string(
+          name: 'VERSION',
+          defaultValue: '4.2.1',
+          description: 'версия приложения (major.minor.patch)' )
+      }
+
+      stages {
+        stage('Get max version') {
+
+          when {
+            expression { return ("${VERSION}".contains('max') || "${VERSION}".contains('SNAPSHOT')) }
+          }
+
+          steps {
+            deleteDir()
+            script {
+
+              git url: '::t_gitUrl::/DEVOPS/XXX/create-jenkins-jobs-lib.git', branch: "dev", credentialsId: '::t_gitCredentials::'
+
+              def scriptFile = new File("${WORKSPACE}/scripts/getMaxChartVersion.groovy")
+              def fileContent = scriptFile.getText('UTF-8')
+
+              fileContent = fileContent.replace(':chartmuseumUrl:', "::t_chartmuseum::")
+              fileContent = fileContent.replace(':chartmuseumApiUrl:', "::t_chartmuseum::/api/charts/")
+              fileContent = fileContent.replace(':nameChart:', "::t_artifact::")
+              fileContent = fileContent.replace(':ver:', "${VERSION}")
+
+              def outFile = new File("${WORKSPACE}/script.groovy")
+              outFile.write(fileContent, 'UTF-8')
+
+              VERSION = sh (script: "${GROOVY_HOME}bin/groovy script.groovy",
+                            returnStdout: true
+                        ).trim().split("\\r?\\n")[-1]
+            }
+          }
+        }
+    
+        stage('Helm') {
+          steps {
+            git url: '::t_gitUrl::/::t_git::', branch: '::t_gitBranch::', credentialsId: '::t_gitCredentials::'
+
+            script {
+                PROJECT_NAME = '::t_artifact::'
+                PROJECT_VERSION = "${VERSION}"
+                if ("::t_chart_name::".isEmpty()) {
+                    CHART_NAME="${NAMESPACE_PREFIX}-${PROJECT_NAME}"
+                }
+                else {
+                    CHART_NAME="::t_chart_name::"
+                }
+
+                currentBuild.displayName = "${PROJECT_VERSION}"
+                currentBuild.description = "PROJECT_NAME=${PROJECT_NAME}\nPROJECT_VERSION=${PROJECT_VERSION}\nCHART_NAME=${CHART_NAME}\n"
+            }
+
+            //helm
+           withCredentials([::t_credentials_CTX::]) {
+              script {
+                HELM_EXTRA = "::t_helm_extra_CTX::"
+                HELM_VER = "::t_helm_ver::"
+
+                
+                if ( HELM_VER == '3') {
+                    HELM_REPO_CMD = "helm3 repo update"
+                    HELM_LIST_CMD = "helm3 list --namespace ${NAMESPACE_PREFIX}"
+                    HELM_INSTALL_CMD = "helm3 install ${CHART_NAME} ${CHARTMUSEUM_NAME}/${PROJECT_NAME} \
+                              -f ::t_charts_dir::/values.yaml \
+                              --version ${PROJECT_VERSION} \
+                              --namespace ${NAMESPACE_PREFIX} \
+                              ${HELM_EXTRA}"
+                    HELM_UPGRADE_CMD = "helm3 upgrade ${CHART_NAME} ${CHARTMUSEUM_NAME}/${PROJECT_NAME} \
+                              -f ::t_charts_dir::/values.yaml \
+                              --version ${PROJECT_VERSION} \
+                              --namespace ${NAMESPACE_PREFIX} \
+                              ${HELM_EXTRA}"
+                } else {
+                    HELM_REPO_CMD = "helm repo update"
+                    HELM_LIST_CMD = "helm list"
+                    HELM_INSTALL_CMD = "helm install ${CHARTMUSEUM_NAME}/${PROJECT_NAME} \
+                              -f ::t_charts_dir::/values.yaml \
+                              --version ${PROJECT_VERSION} \
+                              --name ${CHART_NAME} \
+                              --namespace ${NAMESPACE_PREFIX} \
+                              ${HELM_EXTRA}"
+                    HELM_UPGRADE_CMD = "helm upgrade \
+                              -f ::t_charts_dir::/values.yaml \
+                              --version ${PROJECT_VERSION} \
+                              --recreate-pods ${CHART_NAME} ${CHARTMUSEUM_NAME}/${PROJECT_NAME} \
+                              ${HELM_EXTRA}"
+                }
+
+                sshPublisher(
+                  publishers: [
+                    sshPublisherDesc(
+                      configName: '::t_k8s_server::',
+                      transfers: [
+                        sshTransfer(
+                          sourceFiles: "::t_charts_dir::/*",
+                          remoteDirectory: "/opt/jenkins/${JOB_NAME}/${BUILD_NUMBER}",
+                          removePrefix: ""
+                        ),
+                        sshTransfer(
+                          execCommand: "${HELM_REPO_CMD}"
+                        ),
+                        sshTransfer(
+                          execCommand: """
+                            cd "/opt/jenkins/${JOB_NAME}/${BUILD_NUMBER}"
+
+                            if [ -z "\$(${HELM_LIST_CMD} | grep $CHART_NAME)" ]
+                               then ${HELM_INSTALL_CMD}
+                               else ${HELM_UPGRADE_CMD}
+                            fi
+                          """
+                        )
+                      ]
+                    )
+                  ]
+                )
+              }
+            }
+          }
+        }
+      }
+    }

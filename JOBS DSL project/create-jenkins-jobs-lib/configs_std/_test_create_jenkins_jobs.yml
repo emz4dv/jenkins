@@ -1,0 +1,136 @@
+#Required properties:
+#=====================
+#Name: create-jenkins-jobs_${PROJECT_NAME}
+#t_system_code: ${PROJECT_NAME}
+#t_CONTEXT: ['build', 'dev', 'service']
+#t_FOLDER_NAME: ['configs_build', 'configs_deploy', 'configs_service']
+#=====================
+parentFolderPath: '_CREATE-JOBS'
+
+TemplateVer: 1
+Pipeline:
+
+  script: |
+    pipeline {
+      agent any
+
+      parameters {
+
+        string(
+          name: 'JOBS_NAME',
+          description: 'Имена yml-скриптов, описывающих сборку (через пробел)')
+
+        choice(
+          name: 'CONTEXT',
+          choices: ::t_CONTEXT::,
+          description: 'Контекст')
+
+        choice(
+          name: 'CONFIGS_DIR',
+          choices: ::t_FOLDER_NAME::,
+          description: 'Папка с конфигами задач')
+
+        choice(
+          choices: ['Да', 'Нет'],
+          description: 'Новая структура репозиториев ГИТ?',
+          name: 'GIT_NEW')
+      }
+
+      stages {
+        stage('Git') {
+          steps {
+            deleteDir()
+            script {
+              def systemCodeLower = '::t_system_code::'.toLowerCase()
+
+              if (GIT_NEW.equals('Да')) {
+                git url: "::t_gitUrl::/DEVOPS/::t_jobsFolder::/jobs-${systemCodeLower}.git", branch: "::t_gitBranch::", credentialsId: '::t_gitCredentials::'
+              }
+              else {
+                git url: '::t_gitUrl::/DEVOPS/XX/::t_system_code::/create-jenkins-jobs.git', branch: "::t_gitBranch::", credentialsId: '::t_gitCredentials::'
+              }
+
+              dir ('lib') {
+                git url: '::t_gitUrl::/DEVOPS/XXX/create-jenkins-jobs-lib.git', branch: "::t_gitBranch::", credentialsId: '::t_gitCredentials::'
+              }
+
+              currentBuild.displayName = "#${BUILD_NUMBER} ${JOBS_NAME} ${CONTEXT}"
+            }
+          }
+        }
+
+        stage('Script execution') {
+          steps {
+            script {
+
+                def ctxParameters = readYaml file: "${WORKSPACE}/${CONFIGS_DIR}/app-dev.yml"
+                def jobFiles = sh(script: "find ${WORKSPACE}/${CONFIGS_DIR} -type f -print",
+                                returnStdout: true).trim().split("\\r?\\n")
+                def jobFilesPath = [:]
+                jobFiles.each {
+                    jobFilesPath.put(new File(it).getName(), it)
+                }
+                JOBS_NAME.split(' ').each {
+                    def jobConfig = readYaml file: jobFilesPath[it]
+                    def jobTemplate = readYaml file: "${WORKSPACE}/lib/configs_std/${jobConfig.template}"
+                    jobPipeline = jobTemplate.Pipeline.script
+                    if (jobTemplate.template_allowed_cxt.contains(CONTEXT)) {
+                        jobPipeline = jobPipeline.replace("::t_ctx::", CONTEXT)
+                    } else {
+                        error("Not allowed context!")
+                    }
+
+
+                    ctxParameters.each { key, val ->
+                        jobPipeline = jobPipeline.replace("::${key}::", val)
+                    }
+                    jobConfig.each { key, val ->
+                        if (key.contains('t_')) {
+                            jobPipeline = jobPipeline.replace("::${key}::", val)
+                        }
+                    }
+                    def jobFullPath = "${ctxParameters.parentFolderPath}/${jobConfig.Folder}"
+                    def jobFullName = "${jobFullPath}/${jobConfig.Name}"
+                    new File("${WORKSPACE}/${jobConfig.Name}.pipeline") << jobPipeline
+
+                    jobDsl scriptText:
+                        """
+                            def folders = "${jobFullPath}".split('/')
+                            def parentFolderPath = ''
+
+                            folders.each {
+                                def currentFolder = it
+                                def currentFolderPath = parentFolderPath + '/' +  currentFolder
+                                folder(currentFolderPath) {
+                                    displayName(currentFolder)
+                                    description('Folder for ' + currentFolder)
+                                }
+                                parentFolderPath += '/'+currentFolder
+                            }
+
+                            pipelineJob("${jobFullName}") {
+                                displayName("${jobConfig.Name}")
+                                definition {
+                                    cps {
+                                        script(readFileFromWorkspace("${WORKSPACE}/${jobConfig.Name}.pipeline"))
+                                    }
+                                }
+                            }
+                        """
+                        if (jobPipeline.contains('parameters')) {
+                            try {
+                                build job: "${jobFullName}"
+                            }
+                            catch (err) {
+                                def jobName = "${jobFullName}"
+                                def job = Jenkins.instance.getItemByFullName(jobName)
+                                job.getBuilds()[0].delete()
+                            }
+                        }
+
+                }
+            }
+          }
+        }
+      }
+    }

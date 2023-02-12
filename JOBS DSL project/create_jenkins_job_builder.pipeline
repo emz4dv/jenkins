@@ -1,0 +1,78 @@
+import org.yaml.snakeyaml.Yaml
+
+node {
+    properties([
+        parameters([
+            string(
+                defaultValue: 'DEMO',
+                description: 'Наименование ИС',
+                name: 'PROJECT_NAME',
+                trim: true
+            )
+        ])
+    ])
+
+    stage('Git') {
+        deleteDir()
+        git url: 'http://rnd-gitlab-01.tns/DEVOPS/CDP/create-jenkins-jobs-lib.git', branch: "dev", credentialsId: 'GitLab-01-User-Cred'
+    }
+
+    stage('Create job') {
+        currentBuild.displayName = "#${BUILD_NUMBER} ${PROJECT_NAME}"
+        def TPL = new Yaml().load(("${WORKSPACE}/configs_std/_test_create_jenkins_jobs.yml" as File).text)
+        def pipeline = TPL.Pipeline.script
+        PARAMS = [
+            t_parentFolderPath: "_CREATE-JOBS",
+            t_gitUrl: "http://rnd-gitlab-01.tns",
+            t_gitCredentials: "GitLab-01-User-Cred",
+            t_jobsFolder: "RIF",
+            t_jobName: "create-jenkins-jobs_${PROJECT_NAME}",
+            t_system_code: PROJECT_NAME,
+            t_CONTEXT: "['build', 'dev', 'service']",
+            t_FOLDER_NAME: """[
+                'configs_build',
+                'configs_deploy_XXX-dev',
+                'configs_deploy_demo-dev',
+                'configs_deploy_XXX-dev',
+                'configs_deploy_XXX-cnstr',
+                'configs_deploy_XXX-dev',
+                'configs_service',
+                'configs_tests'
+            ]""",
+            t_gitBranch: "dev"
+
+
+        ]
+        PARAMS.each { key, val ->
+          pipeline = pipeline.replace("::${key}::", val)
+        }
+        //Update script variables
+        new File("${WORKSPACE}/test.groovy") << pipeline
+        jobFullName = "${PARAMS.t_parentFolderPath}/create-jenkins-jobs_${PROJECT_NAME}"
+        jobDsl scriptText:
+            """
+                folder("${PARAMS.t_parentFolderPath}") {
+                    displayName("${PARAMS.t_parentFolderPath}")
+                    description('Folder for create jenkins jobs')
+                }
+                pipelineJob("${jobFullName}") {
+                    displayName("create-jenkins-jobs_${PROJECT_NAME}")
+                    definition {
+                        cps {
+                            script(readFileFromWorkspace('test.groovy'))
+                        }
+                    }
+                }
+            """
+    }
+    stage('Build job and refresh params') {
+        try {
+            build job: "${jobFullName}", parameters: [string(name: 'JOBS_NAME', value: ''), string(name: 'CONTEXT', value: 'build'), string(name: 'CONFIGS_DIR', value: 'configs_build'), string(name: 'GIT_NEW', value: 'Да')]
+        }
+        catch (err) {
+            def jobName = "${jobFullName}"
+            def job = Jenkins.instance.getItemByFullName(jobName)
+            job.getBuilds()[0].delete()
+        }
+    }
+}

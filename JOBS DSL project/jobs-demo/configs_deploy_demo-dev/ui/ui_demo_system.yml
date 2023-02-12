@@ -1,0 +1,7 @@
+template: _test_ui_deploy.yml
+
+JobVer: 1
+t_appName: demo-system
+t_artifact: '@XXX/demo-system'
+Folder: ui
+Name: DEMO

@@ -1,0 +1,7 @@
+template: _test_java_deploy.yml
+
+JobVer: 1
+t_appName: demo-app
+t_artifact: ''
+Folder: app
+Name: DEMO
